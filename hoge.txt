@@ -4,23 +4,12 @@
 REMOTE=origin
 OWNER="your-github-username-or-org"
 REPO="your-repo-name"
+TOKEN="${GITHUB_TOKEN}"
 
-# OAuth アプリのクライアントID & シークレット
-CLIENT_ID="your-client-id"
-CLIENT_SECRET="your-client-secret"
-
-# トークン取得（OAuthフロー）
-echo "Getting GitHub OAuth token..."
-TOKEN=$(curl -s -X POST -u "$CLIENT_ID:$CLIENT_SECRET" \
-    -H "Accept: application/json" \
-    -d "grant_type=client_credentials" \
-    "https://api.github.com/login/oauth/access_token" | jq -r '.access_token')
-
-if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
-  echo "Error: GitHubトークンの取得に失敗しました。"
+if [ -z "$TOKEN" ]; then
+  echo "Error: GitHubトークンが設定されていません。"
   exit 1
 fi
-echo "GitHub token acquired."
 
 # `jq` コマンドが必要
 if ! command -v jq &> /dev/null; then
@@ -49,7 +38,7 @@ for branch in $branches; do
   git push -u $REMOTE "$new_branch"
 
   # GitHub APIで `poc/poc_` ブランチの最新プルリクを取得
-  pr_data=$(curl -s -H "Authorization: Bearer $TOKEN" \
+  pr_data=$(curl -s -H "Authorization: token $TOKEN" \
     "https://api.github.com/repos/$OWNER/$REPO/pulls?state=closed&head=$OWNER:$branch")
 
   if [ -z "$pr_data" ] || [ "$(echo "$pr_data" | jq 'length')" -eq 0 ]; then
@@ -64,10 +53,42 @@ for branch in $branches; do
   pr_base=$(echo "$pr_data" | jq -r '.[0].base.ref')
 
   # 追加情報を取得
-  reviewers=$(curl -s -H "Authorization: Bearer $TOKEN" "https://api.github.com/repos/$OWNER/$REPO/pulls/$pr_number/requested_reviewers" | jq -r '[.users[].login] | join(",")')
+  reviewers=$(curl -s -H "Authorization: token $TOKEN" "https://api.github.com/repos/$OWNER/$REPO/pulls/$pr_number/requested_reviewers" | jq -r '[.users[].login] | join(",")')
   assignees=$(echo "$pr_data" | jq -r '.[0].assignees | map(.login) | join(",")')
   labels=$(echo "$pr_data" | jq -r '.[0].labels | map(.name) | join(",")')
   milestone=$(echo "$pr_data" | jq -r '.[0].milestone.number // empty')
 
   # プルリクを作成
-  pr_create_command
+  pr_create_command="gh pr create --base \"$pr_base\" --head \"$new_branch\" --title \"$pr_title\" --body \"$pr_body\""
+  if [ -n "$assignees" ]; then pr_create_command+=" --assignee \"$assignees\""; fi
+  if [ -n "$reviewers" ]; then pr_create_command+=" --reviewer \"$reviewers\""; fi
+  if [ -n "$labels" ]; then pr_create_command+=" --label \"$labels\""; fi
+  if [ -n "$milestone" ]; then pr_create_command+=" --milestone \"$milestone\""; fi
+
+  echo "Executing: $pr_create_command"
+  eval "$pr_create_command"
+
+  # GitHub Projects & Epics (GraphQL API)
+  graphql_query='{
+    repository(owner: "'$OWNER'", name: "'$REPO'") {
+      pullRequest(number: '$pr_number') {
+        projectCards(first: 10) { nodes { project { id } } }
+      }
+    }
+  }'
+  
+  project_data=$(curl -s -X POST -H "Authorization: bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"query": "'"$graphql_query"'"}' "https://api.github.com/graphql")
+
+  projects=$(echo "$project_data" | jq -r '.data.repository.pullRequest.projectCards.nodes[].project.id')
+
+  if [ -n "$projects" ]; then
+    for project_id in $projects; do
+      gh project item-add "$project_id" --content "$new_branch"
+    done
+  fi
+
+  echo "Pull Request created for $new_branch!"
+done
+
+echo "すべてのブランチの処理が完了しました。"
