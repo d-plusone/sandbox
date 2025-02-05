@@ -12,7 +12,7 @@ if [ -z "$TOKEN" ]; then
 fi
 
 # リモートのブランチ一覧を取得し、`poc/poc_` のものをフィルタ
-branches=$(git branch -r | grep "$REMOTE/poc/poc_" | sed "s|$REMOTE/||")
+branches=$(git branch -r | grep "$REMOTE/poc/" | sed "s|$REMOTE/||")
 
 if [ -z "$branches" ]; then
   echo "対象のブランチが見つかりませんでした。"
@@ -21,7 +21,7 @@ fi
 
 # 各ブランチを feature_ に置換して処理
 for branch in $branches; do
-  new_branch=$(echo "$branch" | sed 's|poc/poc_|feature_|')
+  new_branch=$(echo "$branch" | sed 's|poc/|feature/test_feature_|')
 
   echo "Fetching $branch..."
   git fetch $REMOTE $branch
@@ -32,9 +32,12 @@ for branch in $branches; do
   echo "Pushing to remote: $new_branch..."
   git push -u $REMOTE "$new_branch"
 
+  # ブランチ名の `#` を `%23` に置換
+  encoded_branch=${branch//\#/%23}
+
   # GitHub APIを使って、`poc/poc_` ブランチの最新のプルリクを取得
   pr_data=$(curl -s -H "Authorization: token $TOKEN" \
-    "https://api.github.com/repos/$OWNER/$REPO/pulls?state=closed&head=$OWNER:$branch")
+    "https://api.github.com/repos/$OWNER/$REPO/pulls?state=closed&head=$OWNER:$encoded_branch")
 
   # PRデータが空ならスキップ
   if [ -z "$pr_data" ] || [ "$(echo "$pr_data" | jq 'length')" -eq 0 ]; then
@@ -70,20 +73,17 @@ for branch in $branches; do
   echo "Creating Pull Request: $new_branch -> $pr_base"
 
   # GitHub CLI (`gh`) を使ってプルリクを作成
-  # gh pr create --base "$pr_base" --head "$new_branch" --title "$pr_title" --body "$pr_body"
-  # gh pr create --base "develop" --head "$new_branch" --title "$pr_title" --body "$pr_body"
-  # プルリクを作成
   pr_create_command="gh pr create --base \"develop\" --head \"$new_branch\" --title \"$pr_title\" --body \"$pr_body\""
   if [ -n "$assignees" ]; then pr_create_command+=" --assignee \"$assignees\""; fi
   if [ -n "$reviewers" ]; then pr_create_command+=" --reviewer \"$reviewers\""; fi
   if [ -n "$labels" ]; then pr_create_command+=" --label \"$labels\""; fi
   if [ -n "$milestone" ]; then pr_create_command+=" --milestone \"$milestone\""; fi
 
-# 構築されたコマンドをエコーで確認
-echo "PR Create Command: $pr_create_command"
+  # 構築されたコマンドをエコーで確認
+  echo "PR Create Command: $pr_create_command"
 
-# 実行
-eval $pr_create_command
+  # 実行
+  eval $pr_create_command
 
   echo "Pull Request created for $new_branch!"
 done
