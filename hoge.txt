@@ -1,23 +1,17 @@
 #!/bin/bash
 
-# GitHubリポジトリ情報
+# GitHubリモートリポジトリ
 REMOTE=origin
-OWNER="your-github-username-or-org"
-REPO="your-repo-name"
-TOKEN="${GITHUB_TOKEN}"
+OWNER="d-plusone"
+REPO="sandbox"
+TOKEN="token"
 
 if [ -z "$TOKEN" ]; then
   echo "Error: GitHubトークンが設定されていません。"
   exit 1
 fi
 
-# `jq` コマンドが必要
-if ! command -v jq &> /dev/null; then
-  echo "Error: jq がインストールされていません。"
-  exit 1
-fi
-
-# リモートの `poc/poc_` ブランチを取得
+# リモートのブランチ一覧を取得し、`poc/poc_` のものをフィルタ
 branches=$(git branch -r | grep "$REMOTE/poc/poc_" | sed "s|$REMOTE/||")
 
 if [ -z "$branches" ]; then
@@ -25,6 +19,7 @@ if [ -z "$branches" ]; then
   exit 1
 fi
 
+# 各ブランチを feature_ に置換して処理
 for branch in $branches; do
   new_branch=$(echo "$branch" | sed 's|poc/poc_|feature_|')
 
@@ -37,10 +32,11 @@ for branch in $branches; do
   echo "Pushing to remote: $new_branch..."
   git push -u $REMOTE "$new_branch"
 
-  # GitHub APIで `poc/poc_` ブランチの最新プルリクを取得
+  # GitHub APIを使って、`poc/poc_` ブランチの最新のプルリクを取得
   pr_data=$(curl -s -H "Authorization: token $TOKEN" \
     "https://api.github.com/repos/$OWNER/$REPO/pulls?state=closed&head=$OWNER:$branch")
 
+  # PRデータが空ならスキップ
   if [ -z "$pr_data" ] || [ "$(echo "$pr_data" | jq 'length')" -eq 0 ]; then
     echo "元のプルリクエストが見つかりませんでした: $branch"
     continue
@@ -49,8 +45,13 @@ for branch in $branches; do
   # 最新のプルリク情報を取得
   pr_number=$(echo "$pr_data" | jq -r '.[0].number')
   pr_title=$(echo "$pr_data" | jq -r '.[0].title')
-  pr_body=$(echo "$pr_data" | jq -r '.[0].body // ""')
+  pr_body=$(echo "$pr_data" | jq -r '.[0].body')
   pr_base=$(echo "$pr_data" | jq -r '.[0].base.ref')
+
+  # `pr_body` が null の場合、空文字に置き換え
+  if [ "$pr_body" == "null" ]; then
+    pr_body=""
+  fi
 
   # 追加情報を取得
   reviewers=$(curl -s -H "Authorization: token $TOKEN" "https://api.github.com/repos/$OWNER/$REPO/pulls/$pr_number/requested_reviewers" | jq -r '[.users[].login] | join(",")')
@@ -58,35 +59,31 @@ for branch in $branches; do
   labels=$(echo "$pr_data" | jq -r '.[0].labels | map(.name) | join(",")')
   milestone=$(echo "$pr_data" | jq -r '.[0].milestone.number // empty')
 
+  echo "PR Title: $pr_title"
+  echo "PR Body: $pr_body"
+  echo "PR Base: $pr_base"
+  echo "PR Reviewers: $reviewers"
+  echo "PR Assignees: $assignees"
+  echo "PR Labels: $labels"
+  echo "PR Milestone: $milestone"
+
+  echo "Creating Pull Request: $new_branch -> $pr_base"
+
+  # GitHub CLI (`gh`) を使ってプルリクを作成
+  # gh pr create --base "$pr_base" --head "$new_branch" --title "$pr_title" --body "$pr_body"
+  # gh pr create --base "develop" --head "$new_branch" --title "$pr_title" --body "$pr_body"
   # プルリクを作成
-  pr_create_command="gh pr create --base \"$pr_base\" --head \"$new_branch\" --title \"$pr_title\" --body \"$pr_body\""
+  pr_create_command="gh pr create --base \"develop\" --head \"$new_branch\" --title \"$pr_title\" --body \"$pr_body\""
   if [ -n "$assignees" ]; then pr_create_command+=" --assignee \"$assignees\""; fi
   if [ -n "$reviewers" ]; then pr_create_command+=" --reviewer \"$reviewers\""; fi
   if [ -n "$labels" ]; then pr_create_command+=" --label \"$labels\""; fi
   if [ -n "$milestone" ]; then pr_create_command+=" --milestone \"$milestone\""; fi
 
-  echo "Executing: $pr_create_command"
-  eval "$pr_create_command"
+# 構築されたコマンドをエコーで確認
+echo "PR Create Command: $pr_create_command"
 
-  # GitHub Projects & Epics (GraphQL API)
-  graphql_query='{
-    repository(owner: "'$OWNER'", name: "'$REPO'") {
-      pullRequest(number: '$pr_number') {
-        projectCards(first: 10) { nodes { project { id } } }
-      }
-    }
-  }'
-  
-  project_data=$(curl -s -X POST -H "Authorization: bearer $TOKEN" -H "Content-Type: application/json" \
-    -d '{"query": "'"$graphql_query"'"}' "https://api.github.com/graphql")
-
-  projects=$(echo "$project_data" | jq -r '.data.repository.pullRequest.projectCards.nodes[].project.id')
-
-  if [ -n "$projects" ]; then
-    for project_id in $projects; do
-      gh project item-add "$project_id" --content "$new_branch"
-    done
-  fi
+# 実行
+eval $pr_create_command
 
   echo "Pull Request created for $new_branch!"
 done
