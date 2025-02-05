@@ -1,0 +1,73 @@
+#!/bin/bash
+
+# GitHubリポジトリ情報
+REMOTE=origin
+OWNER="your-github-username-or-org"
+REPO="your-repo-name"
+
+# OAuth アプリのクライアントID & シークレット
+CLIENT_ID="your-client-id"
+CLIENT_SECRET="your-client-secret"
+
+# トークン取得（OAuthフロー）
+echo "Getting GitHub OAuth token..."
+TOKEN=$(curl -s -X POST -u "$CLIENT_ID:$CLIENT_SECRET" \
+    -H "Accept: application/json" \
+    -d "grant_type=client_credentials" \
+    "https://api.github.com/login/oauth/access_token" | jq -r '.access_token')
+
+if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
+  echo "Error: GitHubトークンの取得に失敗しました。"
+  exit 1
+fi
+echo "GitHub token acquired."
+
+# `jq` コマンドが必要
+if ! command -v jq &> /dev/null; then
+  echo "Error: jq がインストールされていません。"
+  exit 1
+fi
+
+# リモートの `poc/poc_` ブランチを取得
+branches=$(git branch -r | grep "$REMOTE/poc/poc_" | sed "s|$REMOTE/||")
+
+if [ -z "$branches" ]; then
+  echo "対象のブランチが見つかりませんでした。"
+  exit 1
+fi
+
+for branch in $branches; do
+  new_branch=$(echo "$branch" | sed 's|poc/poc_|feature_|')
+
+  echo "Fetching $branch..."
+  git fetch $REMOTE $branch
+
+  echo "Creating local branch: $new_branch..."
+  git checkout -b "$new_branch" "$REMOTE/$branch"
+
+  echo "Pushing to remote: $new_branch..."
+  git push -u $REMOTE "$new_branch"
+
+  # GitHub APIで `poc/poc_` ブランチの最新プルリクを取得
+  pr_data=$(curl -s -H "Authorization: Bearer $TOKEN" \
+    "https://api.github.com/repos/$OWNER/$REPO/pulls?state=closed&head=$OWNER:$branch")
+
+  if [ -z "$pr_data" ] || [ "$(echo "$pr_data" | jq 'length')" -eq 0 ]; then
+    echo "元のプルリクエストが見つかりませんでした: $branch"
+    continue
+  fi
+
+  # 最新のプルリク情報を取得
+  pr_number=$(echo "$pr_data" | jq -r '.[0].number')
+  pr_title=$(echo "$pr_data" | jq -r '.[0].title')
+  pr_body=$(echo "$pr_data" | jq -r '.[0].body // ""')
+  pr_base=$(echo "$pr_data" | jq -r '.[0].base.ref')
+
+  # 追加情報を取得
+  reviewers=$(curl -s -H "Authorization: Bearer $TOKEN" "https://api.github.com/repos/$OWNER/$REPO/pulls/$pr_number/requested_reviewers" | jq -r '[.users[].login] | join(",")')
+  assignees=$(echo "$pr_data" | jq -r '.[0].assignees | map(.login) | join(",")')
+  labels=$(echo "$pr_data" | jq -r '.[0].labels | map(.name) | join(",")')
+  milestone=$(echo "$pr_data" | jq -r '.[0].milestone.number // empty')
+
+  # プルリクを作成
+  pr_create_command
